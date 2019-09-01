@@ -3,68 +3,124 @@ import json
 
 import boto3
 
-def fetch_attached_user_policies(pv_role_session, user_name):
+import util
+
+def filter_account_authorization_details(account_authorization_details):
     """
-    Fetches managed policies that are attached to IAM User
+    Filters account_authorization_details to keep only required information in a simpler format
 
-    :param pv_role_session: A session object to communicate with PolicyViz user AWS account
-    :param user_name: Name of the IAM User
+    :param account_authorization_details: A dictionary containing information of (users, groups, roles, and policies)
+    of the PolicyViz user AWS account
 
-    :return: List of policies attached
-    """
-
-    # iam_client used to interact with IAM API
-    iam_client = pv_role_session.client('iam')
-
-    response = iam_client.list_attached_user_policies(UserName=user_info['UserName'])  # list managed policies
-    user_policy_infos = response['AttachedPolicies']  # user_policies_info contains policy names and ARNs
-
-    """
-    user_policy_documents = []  # stores the policy documents
-    for user_policy_info in user_policy_infos:
-        response = iam_client.list_policy_versions(user_policy_info['PolicyArn'])
-        policy_versions = response['Versions']
-
-        for policy_version in policy_versions:
-            if policy_version['IsDefaultVersion'] == True:
-                user_policy_documents.append(policy_version['Document'])
+    :return: A filtered dictionary containing information of (users, groups, and policies)
+    of the PolicyViz user AWS account
     """
 
+    filtered_details = {}
+
+    # filtering users
+    filtered_details['UserDetailList'] = {}
+    filtered_users = filtered_details['UserDetailList']
+    users = account_authorization_details['UserDetailList']
+
+    group_users = {}  # key=group name, value=list of users in group
+    for user in users:
+        filtered_user = {}
+        user_name = user['UserName']
+        filtered_user['UserName'] = user['UserName']
+        filtered_user['AttachedManagedPolicies'] = []
+
+        for policy_info in user['AttachedManagedPolicies']:
+            filtered_user['AttachedManagedPolicies'].append(policy_info['PolicyName'])
+
+        for group_name in user['GroupList']:
+            if group_name not in group_users:
+                group_users[group_name] = []
+            group_users[group_name].append(user_name)
+
+        filtered_users[user_name] = filtered_user
+
+        # filtering users
+        filtered_details['UserDetailList'] = {}
+        filtered_users = filtered_details['UserDetailList']
+        users = account_authorization_details['UserDetailList']
+
+        group_users = {}  # key=group name, value=list of users in group
+        for user in users:
+            filtered_user = {}
+            user_name = user['UserName']
+            filtered_user['UserName'] = user['UserName']
+            filtered_user['AttachedManagedPolicies'] = []
+
+            for policy_info in user['AttachedManagedPolicies']:
+                filtered_user['AttachedManagedPolicies'].append(policy_info['PolicyName'])
+
+            for group_name in user['GroupList']:
+                if group_name not in group_users:
+                    group_users[group_name] = []
+                group_users[group_name].append(user_name)
+
+            filtered_users[user_name] = filtered_user
+
+
+    # filtering groups
+    filtered_details['GroupDetailList'] = {}
+    filtered_groups = filtered_details['GroupDetailList']
+    groups = account_authorization_details['GroupDetailList']
+
+    for group in groups:
+        filtered_group = {}
+        group_name = group['GroupName']
+        filtered_group['GroupName'] = group['GroupName']
+        filtered_group['AttachedManagedPolicies'] = []
+
+        for policy_info in group['AttachedManagedPolicies']:
+            filtered_group['AttachedManagedPolicies'].append(policy_info['PolicyName'])
+
+        if group_name in group_users.keys():
+            filtered_group['GroupUsers'] = group_users[group_name]
+        else:
+            filtered_group['GroupUsers'] = []
+
+        filtered_groups[group_name] = filtered_group
+
+
+    # filtering policies
+    filtered_details['Policies'] = {}
+    filtered_policies = filtered_details['Policies']
+    policies = account_authorization_details['Policies']
+
+    for policy in policies:
+        if policy['IsAttachable']:
+            filtered_policy = {}
+            policy_name = policy['PolicyName']
+            filtered_policy['PolicyName'] = policy['PolicyName']
+
+            for policy_version in policy['PolicyVersionList']:
+                if policy_version['IsDefaultVersion']:
+                    filtered_policy['Document'] = policy_version['Document']
+
+            filtered_policies[policy_name] = filtered_policy
+
+    return filtered_details
 
 def fetch_account_details(pv_role_session):
     """
-    Fetches details of user, groups, etc from the PolicyViz user AWS account
+    Fetches a snapshot of the configuration of IAM permissions (users, groups, roles, and policies)
+    from PolicyViz user account
 
     :param pv_role_session: A session object to communicate with PolicyViz user AWS account
 
-    :return: A dictionary containing information of users, groups, etc of the PolicyViz user AWS account
+    :return: A dictionary containing information of (users, groups, roles, and policies)
+    of the PolicyViz user AWS account
     """
 
     print("\n======== Fetching account details =========\n")
 
-    account_authorization_details = {}  # stores information of users, groups, etc
-
     # iam_client used to interact with IAM API
     iam_client = pv_role_session.client('iam')
 
-    # Fetches a snapshot of the configuration of IAM permissions (users, groups, roles, and policies) in your account
-    account_authorization_details = iam_client.get_account_authorization_details()
-
-    """
-
-    # IAM users in account
-    response = iam_client.list_users()
-    account_details['Users'] = response['Users']
-    print("\nlist_users response: ", response)
-    print("\nUsers: ", json.dumps(response['Users'], indent=2, default=str))
-
-    # IAM groups in account
-    response = iam_client.list_groups()
-    account_details['Groups'] = response['Groups']
-    print("\nlist_groups response: ", response)
-    print("\nGroups: ", json.dumps(response['Groups'], indent=2, default=str))
-    """
-
+    account_authorization_details = iam_client.get_account_authorization_details(Filter=['User', 'Group', 'LocalManagedPolicy', 'AWSManagedPolicy'])
 
     return account_authorization_details
 
@@ -138,17 +194,27 @@ if __name__ == '__main__':
 
     account_authorization_details = fetch_account_details(pv_role_session)
 
-    print(json.dumps(account_authorization_details, indent=2, default=str))
+    print("\n==> account_authorization_details\n:", json.dumps(account_authorization_details, indent=2, default=str))
 
-    """
-    # fetch users, groups from PolicyViz user AWS account
-    account_details = fetch_account_details(pv_role_session)
+    account_authorization_details = filter_account_authorization_details(account_authorization_details)
 
-    # fetch policies attached with one of the users
-    user_info = account_details['Users'][0]
-    user_name = user_info['UserName']
+    print("\n==> filtered account_authorization_details\n:", json.dumps(account_authorization_details, indent=2, default=str))
 
-    fetch_policies_for_user(pv_role_session, user_name)
+    user_specified_service_name = "rds"  # Policies will be summarized for this service
 
-    print(user_policies)
-    """
+    service_categorized_actions_status = util.get_service_categorized_actions_status(user_specified_service_name)
+
+    print(service_categorized_actions_status)
+
+    print("==> ", json.dumps(service_categorized_actions_status, indent=2))
+
+    groups = account_authorization_details['GroupDetailList']
+    policies = account_authorization_details['Policies']
+
+    # summarize policies for a single group only
+    for group_name, group in groups.items():
+        if group_name == 'QA':
+            util.summarize_policies_for_group(group, policies, service_categorized_actions_status, user_specified_service_name)
+
+
+    print("==> ", json.dumps(service_categorized_actions_status, indent=2))
