@@ -1,9 +1,11 @@
 import configparser
+import copy
 import json
 
 import boto3
 
 import util
+
 
 def filter_account_authorization_details(account_authorization_details):
     """
@@ -28,6 +30,7 @@ def filter_account_authorization_details(account_authorization_details):
         filtered_user = {}
         user_name = user['UserName']
         filtered_user['UserName'] = user['UserName']
+        filtered_user['GroupList'] = user['GroupList']
         filtered_user['AttachedManagedPolicies'] = []
 
         for policy_info in user['AttachedManagedPolicies']:
@@ -39,29 +42,6 @@ def filter_account_authorization_details(account_authorization_details):
             group_users[group_name].append(user_name)
 
         filtered_users[user_name] = filtered_user
-
-        # filtering users
-        filtered_details['UserDetailList'] = {}
-        filtered_users = filtered_details['UserDetailList']
-        users = account_authorization_details['UserDetailList']
-
-        group_users = {}  # key=group name, value=list of users in group
-        for user in users:
-            filtered_user = {}
-            user_name = user['UserName']
-            filtered_user['UserName'] = user['UserName']
-            filtered_user['AttachedManagedPolicies'] = []
-
-            for policy_info in user['AttachedManagedPolicies']:
-                filtered_user['AttachedManagedPolicies'].append(policy_info['PolicyName'])
-
-            for group_name in user['GroupList']:
-                if group_name not in group_users:
-                    group_users[group_name] = []
-                group_users[group_name].append(user_name)
-
-            filtered_users[user_name] = filtered_user
-
 
     # filtering groups
     filtered_details['GroupDetailList'] = {}
@@ -84,6 +64,16 @@ def filter_account_authorization_details(account_authorization_details):
 
         filtered_groups[group_name] = filtered_group
 
+    # adding policies to user from the groups that they are contained in
+    for filtered_user in filtered_users.values():
+        user_name = filtered_user['UserName']
+
+        for group_name in filtered_user['GroupList']:
+            attached_policies_with_parent_group = filtered_groups[group_name]['AttachedManagedPolicies']
+            filtered_user['AttachedManagedPolicies'].extend(attached_policies_with_parent_group)
+
+        filtered_user['AttachedManagedPolicies'] = list(set(filtered_user['AttachedManagedPolicies']))  # unique policies
+        filtered_user.pop('GroupList')
 
     # filtering policies
     filtered_details['Policies'] = {}
@@ -194,27 +184,43 @@ if __name__ == '__main__':
 
     account_authorization_details = fetch_account_details(pv_role_session)
 
-    print("\n==> account_authorization_details\n:", json.dumps(account_authorization_details, indent=2, default=str))
+    # print("\n==> account_authorization_details\n:", json.dumps(account_authorization_details, indent=2, default=str))
 
     account_authorization_details = filter_account_authorization_details(account_authorization_details)
-
-    print("\n==> filtered account_authorization_details\n:", json.dumps(account_authorization_details, indent=2, default=str))
 
     user_specified_service_name = "rds"  # Policies will be summarized for this service
 
     service_categorized_actions_status = util.get_service_categorized_actions_status(user_specified_service_name)
 
-    print(service_categorized_actions_status)
 
-    print("==> ", json.dumps(service_categorized_actions_status, indent=2))
-
-    groups = account_authorization_details['GroupDetailList']
+    groups_summaries = {}
+    users_summaries = {}
     policies = account_authorization_details['Policies']
 
-    # summarize policies for a single group only
+    # update service_categorized_actions_status for each groups by parsing managed policies attached with it
+    groups = account_authorization_details['GroupDetailList']
     for group_name, group in groups.items():
-        if group_name == 'QA':
-            util.summarize_policies_for_group(group, policies, service_categorized_actions_status, user_specified_service_name)
+        specific_entity_service_categorized_actions_status = {}
+        specific_entity_service_categorized_actions_status = copy.deepcopy(service_categorized_actions_status)  # specific for entity
+
+        util.update_service_categorized_actions_status(group, policies, specific_entity_service_categorized_actions_status,
+                                                       user_specified_service_name)
+
+        group_policies_summary = util.summarize_policies(specific_entity_service_categorized_actions_status)
+        groups_summaries[group_name] = group_policies_summary
 
 
-    print("==> ", json.dumps(service_categorized_actions_status, indent=2))
+    users = account_authorization_details['UserDetailList']
+    for user_name, user in users.items():
+        specific_entity_service_categorized_actions_status = {}
+
+        specific_entity_service_categorized_actions_status = copy.deepcopy(service_categorized_actions_status)
+        # specific for entity
+
+        util.update_service_categorized_actions_status(user, policies, specific_entity_service_categorized_actions_status,
+                                                       user_specified_service_name)
+        user_policies_summary = util.summarize_policies(specific_entity_service_categorized_actions_status)
+        users_summaries[user_name] = user_policies_summary
+
+    print("\n\n==>groups_summaries", json.dumps(groups_summaries, indent=2))
+    print("\n\n==>users_summaries", json.dumps(users_summaries, indent=2))

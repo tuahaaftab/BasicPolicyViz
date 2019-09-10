@@ -6,6 +6,9 @@ EXPLICITLY_DENIED = -1
 EXPLICITLY_ALLOWED = 1
 ACCESS_LEVELS = ['List', 'Read', 'Write', 'Permissions management', 'Tagging']
 SERVICES_CATEGORIZED_ACTIONS_FILE_PATH = "../resources/services_categorized_actions_files/"
+GROUP_COLOUR_HEX = "#0955f6"    #Blue
+USER_COLOUR_HEX = "#25b018"  #Green
+
 
 def get_service_categorized_actions_status(service_name):
     """
@@ -19,7 +22,7 @@ def get_service_categorized_actions_status(service_name):
     Actions and their status are appended as key, value pairs in the list of access_level they fall into
     """
 
-    service_categorized_actions_status = {}
+    service_categorized_actions_status = {'*': DENIED}
     for access_level in ACCESS_LEVELS:
         service_categorized_actions_status[access_level] = {}
 
@@ -31,24 +34,25 @@ def get_service_categorized_actions_status(service_name):
             access_level = row[1]
             status = DENIED
             service_categorized_actions_status[access_level].update({action_name: status})
-        service_categorized_actions_status['*'] = 0  # for all actions of service
     service_categorized_actions_file.close()
 
     return service_categorized_actions_status
 
 
-def summarize_policies_for_group(group, policies, service_categorized_actions_status, user_specified_service_name):
+def update_service_categorized_actions_status(entity, policies, specific_entity_service_categorized_actions_status, user_specified_service_name):
     """
-    Parse policies attached with the group and update service_categorized_actions_status accordingly
+    Parse policies attached with the entity and update specific_entity_service_categorized_actions_status accordingly
 
-    :param group: policies attached with this group will be parsed
+    :param entity: policies attached with this entity will be parsed. Entity is a group or a user
     :param policies: dictionary containing all fetched policies
-    :param service_categorized_actions_status: dictionary that stores actions and their status. Updated while parsing policy
+    :param specific_entity_service_categorized_actions_status: dictionary that stores possible actions for a service and their status.
+    Updated while parsing policy
+    :param user_specified_service_name: policies will be summarized for the specified service only
 
-    :return: updated service_categorized_actions_status
+    :return: updated specific_entity_service_categorized_actions_status
     """
 
-    for policy_name in group['AttachedManagedPolicies']:
+    for policy_name in entity['AttachedManagedPolicies']:
         policy_document = policies[policy_name]['Document']
 
         for policy_statement in policy_document['Statement']:
@@ -63,7 +67,8 @@ def summarize_policies_for_group(group, policies, service_categorized_actions_st
             for action in action_list:
                 action = action.split(':')
                 service_name = action[0]
-                action_name = action[1]
+                if len(action) > 1:  # if action = "*", then no service_name exists
+                    action_name = action[1]
 
                 # consider only one service specified by user while parsing policy
                 if service_name != user_specified_service_name:
@@ -71,26 +76,26 @@ def summarize_policies_for_group(group, policies, service_categorized_actions_st
 
                 # ==> ALL services - ALL actions. Example: action = "*"
                 if service_name == '*' and effect == 'Deny':
-                    service_categorized_actions_status['*'] = EXPLICITLY_DENIED
+                    specific_entity_service_categorized_actions_status['*'] = EXPLICITLY_DENIED
                 elif service_name == '*' and effect == 'Allow':
-                    if service_categorized_actions_status['*'] != EXPLICITLY_DENIED:
-                        service_categorized_actions_status['*'] = EXPLICITLY_ALLOWED
+                    if specific_entity_service_categorized_actions_status['*'] != EXPLICITLY_DENIED:
+                        specific_entity_service_categorized_actions_status['*'] = EXPLICITLY_ALLOWED
 
                     for access_level in ACCESS_LEVELS:
-                        access_level_actions_status = service_categorized_actions_status[access_level]
+                        access_level_actions_status = specific_entity_service_categorized_actions_status[access_level]
                         for action_name_stored in access_level_actions_status.keys():
                             if access_level_actions_status[action_name_stored] != EXPLICITLY_DENIED:
                                 access_level_actions_status[action_name_stored] = EXPLICITLY_ALLOWED
 
                 # ==> ONE service - ALL actions. Example: action = "rds:*"
                 elif action_name == '*' and effect == 'Deny':
-                    service_categorized_actions_status['*'] = EXPLICITLY_DENIED
+                    specific_entity_service_categorized_actions_status['*'] = EXPLICITLY_DENIED
                 elif action_name == '*' and effect == 'Allow':
-                    if service_categorized_actions_status['*'] != EXPLICITLY_DENIED:
-                        service_categorized_actions_status['*'] = EXPLICITLY_ALLOWED
+                    if specific_entity_service_categorized_actions_status['*'] != EXPLICITLY_DENIED:
+                        specific_entity_service_categorized_actions_status['*'] = EXPLICITLY_ALLOWED
 
                     for access_level in ACCESS_LEVELS:
-                        access_level_actions_status = service_categorized_actions_status[access_level]
+                        access_level_actions_status = specific_entity_service_categorized_actions_status[access_level]
                         for action_name_stored in access_level_actions_status.keys():
                             if access_level_actions_status[action_name_stored] != EXPLICITLY_DENIED:
                                 access_level_actions_status[action_name_stored] = EXPLICITLY_ALLOWED
@@ -98,14 +103,14 @@ def summarize_policies_for_group(group, policies, service_categorized_actions_st
                 # ==> ONE service - MULTIPLE actions. Example: action = "rds:Describe*"
                 elif '*' in action_name and effect == 'Deny':
                     for access_level in ACCESS_LEVELS:
-                        access_level_actions_status = service_categorized_actions_status[access_level]
+                        access_level_actions_status = specific_entity_service_categorized_actions_status[access_level]
                         for action_name_stored in access_level_actions_status.keys():
                             action_name_regex = action_name.replace('*', '.*')
                             if re.match(action_name_regex, action_name_stored):
                                 access_level_actions_status[action_name_stored] = EXPLICITLY_DENIED
                 elif '*' in action_name and effect == 'Allow':
                     for access_level in ACCESS_LEVELS:
-                        access_level_actions_status = service_categorized_actions_status[access_level]
+                        access_level_actions_status = specific_entity_service_categorized_actions_status[access_level]
                         for action_name_stored in access_level_actions_status.keys():
                             action_name_regex = action_name.replace('*', '.*')
                             if re.match(action_name_regex, action_name_stored):
@@ -115,14 +120,55 @@ def summarize_policies_for_group(group, policies, service_categorized_actions_st
                 # ==> ONE service - ONE action. Example: action = "rds:StartDBInstance"
                 elif '*' not in action_name and effect == 'Deny':
                     for access_level in ACCESS_LEVELS:
-                        access_level_actions_status = service_categorized_actions_status[access_level]
+                        access_level_actions_status = specific_entity_service_categorized_actions_status[access_level]
                         if action_name in access_level_actions_status:
                             access_level_actions_status[action_name] = EXPLICITLY_DENIED
                 elif '*' not in action_name and effect == 'Allow':
                     for access_level in ACCESS_LEVELS:
-                        access_level_actions_status = service_categorized_actions_status[access_level]
+                        access_level_actions_status = specific_entity_service_categorized_actions_status[access_level]
                         if action_name in access_level_actions_status:
                             if access_level_actions_status[action_name] != EXPLICITLY_DENIED:
                                 access_level_actions_status[action_name] = EXPLICITLY_ALLOWED
 
+def summarize_policies(service_categorized_actions_status):
+    """
+    Parses service_categorized_actions_status and makes a summary based on it.
 
+    :param service_categorized_actions_status: dictionary that stores possible actions for a service and their status.
+    Updated while parsing policy
+
+    :return: a summary of the policies made by parsing service_categorized_actions_status
+    """
+
+    policies_summary = {'FullAccess': False, 'Full': set(), 'Limited': set(), 'hex': GROUP_COLOUR_HEX}
+
+    if service_categorized_actions_status['*'] == -1:  # all explicitly denied
+        return policies_summary
+
+    for access_level in ACCESS_LEVELS:
+        actions_status_in_access_level = service_categorized_actions_status[access_level]
+
+        count_actions = {"denied": 0, "explicitly_denied": 0, "explicitly_allowed": 0}
+        for action_name, action_status in actions_status_in_access_level.items():
+            if action_status == EXPLICITLY_DENIED:
+                count_actions["explicitly_denied"] += 1
+            elif action_status == DENIED:
+                count_actions["denied"] += 1
+            elif action_status == EXPLICITLY_ALLOWED:
+                count_actions["explicitly_allowed"] += 1
+
+        all_actions_allowed = True
+        total_actions_in_access_level = len(actions_status_in_access_level)
+        if count_actions["explicitly_allowed"] == total_actions_in_access_level:  # All actions are allowed
+            policies_summary['Full'].add(access_level[0])  # First letter of access level is appended
+        elif count_actions["explicitly_allowed"] > 0:  # Some actions are allowed
+            policies_summary['Limited'].add(access_level[0])
+            all_actions_allowed = False
+        else:
+            all_actions_allowed = False
+
+    policies_summary['Full'] = sorted(policies_summary['Full'])
+    policies_summary['Limited'] = sorted(policies_summary['Limited'])
+    policies_summary['FullAccess'] = all_actions_allowed
+
+    return policies_summary
